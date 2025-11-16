@@ -16,7 +16,7 @@ CONF_PLAYER = 0.40
 MIN_BBOX_AREA_FRAC  = 0.006               # allow OCR on smaller players
 
 # OCR cadence & quality gating
-OCR_EVERY_N_FRAMES  = 2                   # run OCR per-track every N frames (near ball OR unlabeled)
+OCR_EVERY_N_FRAMES  = 1                   # run OCR per-track every N frames (near ball OR unlabeled)
 OCR_CONF_MIN        = 0.50                # EasyOCR confidence floor per read
 LEGIBILITY_MIN      = 0.60                # minimum legibility score for trying OCR
 LEGIBILITY_WEIGHTS  = "models/legibility.pth"  # optional legibility model; proxy used if missing
@@ -25,8 +25,8 @@ LEGIBILITY_WEIGHTS  = "models/legibility.pth"  # optional legibility model; prox
 LABEL_WINDOW_SIZE   = 5
 LABEL_MIN_CONSENSUS = 2
 LABEL_TTL_FRAMES    = 50                  # used if sticky lock is disabled
-LABEL_SHOW_CONF_MIN = 0.45
-DISPLAY_SWITCH_CONF_MIN = 0.55            # show jersey if (stable and conf >= this)
+LABEL_SHOW_CONF_MIN = 0.55
+DISPLAY_SWITCH_CONF_MIN = 0.65            # show jersey if (stable and conf >= this)
 
 # Sticky jersey behavior (no revert to ID after lock)
 STICKY_JERSEY_AFTER_LOCK = True           # once we lock a number, keep showing it
@@ -630,7 +630,11 @@ def main():
         for tid, bbox, pconf in players:
             active_tids.append(tid)
             x,y,w,h = bbox
-            cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0), 2)
+            crop, roi = torso_crop(frame, (x, y, w, h), return_box=True)
+            rx1, ry1, rx2, ry2 = roi
+            cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (255, 0, 255), 2)
+
+            #cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0), 2)
 
             jersey, jconf, stable = cache.lookup(tid, frame_idx)
 
@@ -737,9 +741,10 @@ def run_on_image(image_path):
         cv2.circle(frame, (int(cx), int(cy)), 10, (0, 255, 255), -1)
 
     cv2.imshow("Soccer Image", frame)
+    cv2.imwrite("ocr_image.jpg", frame)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    # run_on_image("0_2.jpg")
+    #run_on_image("0_2.jpg")
     main()
