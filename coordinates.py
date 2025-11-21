@@ -138,6 +138,7 @@ def main():
         
         field_locale.get_keypoints(first_frame)
 
+        return
 
         src_pts = select_points(first_frame, HOMOGRAPHY_POINTS)
         if src_pts is None:
