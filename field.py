@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import cv2
 
@@ -197,6 +198,62 @@ def group_segments(segments):
 
     return final_lines
 
+def average_line(lines):
+    # get the average line for a group of lines
+    a, b, c = np.mean(np.array(lines), axis=0)
+
+    # normalize
+    norm = np.hypot(a,b)
+
+    return (a/norm, b/norm, c/norm)
+
+def group_lines(lines):
+    angle_thresh = np.deg2rad(10)
+
+    # [(lower_angle, upper_angle),]
+    groups = []
+
+    # list of lists of line equations
+    sets = []
+
+    for (a, b, c) in lines:
+        theta = np.arctan2(b, a)
+
+        # add first line
+        if len(groups) == 0:
+            groups.append((theta - angle_thresh, theta + angle_thresh))
+            sets.append([(a, b, c)])
+            continue
+
+        group_found = False
+
+        # try to fit line into a group
+        for i, (low, high) in enumerate(groups):
+            if low <= theta <= high:
+                sets[i].append((a, b, c))
+                
+                # fitted, leave loop
+                group_found = True
+                break
+
+        # if not placed in a group, make a new one
+        if not group_found:
+            groups.append((theta - angle_thresh, theta + angle_thresh))
+            sets.append([(a, b, c)])
+
+    # get two most populated groups
+    # this should be the correct lines but could be unstable # TODO TODO
+    group_sizes = [(len(set), i) for i, set in enumerate(sets)]
+    group_sizes.sort(reverse=True)
+
+    # get two most populated groups
+    top_groups = group_sizes[:2]
+
+    _, group1 = top_groups[0]
+    _, group2 = top_groups[1]
+
+    return (average_line(sets[group1])), average_line(sets[group2])
+
 def visualize(image, segments):
     out = image.copy()
 
@@ -204,6 +261,73 @@ def visualize(image, segments):
     for (p1, p2) in segments:
         cv2.line(out, p1, p2, (0, 0, 255), 2)
     return out
+
+def get_field_coordinate(line1, line2, camera_coordinate):
+    # unpack
+    x_c, y_c = camera_coordinate
+    a1,b1,c1 = line1
+    a2,b2,c2 = line2
+
+    x_o,y_o = None
+
+    # origin as intersection of two points
+    # intersection of two lines, group as Ax=b: [a1 b1;a2 b2][x; y]=[-c1;-c2]
+    # check A' is invertible
+    if a1*b2 - a2*b1 < 1e-5:
+        print("Nearly parallel lines. Failed to get coordinates.")
+        return None
+    else:
+        # x = A'b, A'=[b2 -b1; -a2 a1] / (a1*b2-a2*b1)
+        x_o = (c1*b2-c2*b1)/(a1*b2-a2*b1)
+        y_o = (-c1*a2+c2*a1)/(a1*b2-a2*b1)
+
+    # translate camera coordinate to origin at intersection frame
+    # opencv uses top-left origin with increasing x and y to right and down
+    # field should increase to the left for x and increase down for y
+    x = -(x_c - x_o)
+    y = y_c - y_o
+
+    # project point onto either line
+    # line direction dot coordinate / norm of line direction
+    norm1 = math.sqrt(a1*a1 + b1*b1)
+    norm2 = math.sqrt(a2*a2 + b2*b2)
+
+    return ((b1*x-a1*y)/norm1,(b2*x-a2*y)/norm2)
+
+
+### FUNCTIONS TO BE USED EXTERNALLY ###
+def get_coordinates(img, objects):
+    # tuning params
+    max_lines = 8
+    ransac_thresh=2.0
+    ransac_iter=2000
+    min_inliers=30
+
+    # green to get the field only
+    green_mask = mask_field_green(img)
+
+    # use findContours to get the points of external contours (should be close to the field)
+    boundary_pts = get_field_boundary_points(green_mask)
+
+    # get candidate lines using RANSAC (returned as (line, inlier_pts, len(inliers)))
+    candidate_lines = get_candidate_lines(boundary_pts, max_lines, ransac_thresh,
+                                     ransac_iter,min_inliers)
+    
+    # just keep lines from candidates for now # TODO subject to change
+    lines = [line for (line, inliers, coutn) in candidates]
+
+    # get the two most voted for lines to keep as boundary lines 
+    final_line1, final_line2 = group_lines(lines)
+
+    # return the passed objects' field coordinate
+    field_coords = []
+
+    for object in objects:
+        field_coords.append(get_field_coordinate(final_line1, final_line2, object))
+
+    return field_coords
+
+#######################################
 
 if __name__ == "__main__":
     # tuning params
@@ -222,22 +346,40 @@ if __name__ == "__main__":
     candidates = get_candidate_lines(boundary_pts, max_lines, ransac_thresh,
                                      ransac_iter,min_inliers)
 
-    segments = []
+    # just keep lines for now # TODO subject to change
+    lines = [line for (line, inliers, coutn) in candidates]
 
-    for (line, inliers, _) in candidates:
-        if inliers is None or len(inliers) == 0:
-            continue
-        p1, p2 = line_segment_endpoints_from_inliers(inliers)
-        segments.append((p1, p2))
+    final_line1, final_line2 = group_lines(lines)
 
-    final_points = filter_out_border(segments, img.shape)
+    H, W = img.shape[:2]
 
-    print(final_points)
-    #final_points = group_segments(final_points)
+    img_out = img.copy()
+    for (a, b, c) in [final_line1, final_line2]:
 
-    img = visualize(img, final_points)
+        # Compute intersection with image borders
+        pts = []
+        # left (x=0)
+        if abs(b) > 1e-6:
+            y = -(c + a*0) / b
+            if 0 <= y < H: pts.append((0, int(y)))
+        # right (x=W-1)
+        x = W-1
+        if abs(b) > 1e-6:
+            y = -(c + a*x) / b
+            if 0 <= y < H: pts.append((W-1, int(y)))
+        # top (y=0)
+        if abs(a) > 1e-6:
+            x = -(c + b*0) / a
+            if 0 <= x < W: pts.append((int(x), 0))
+        # bottom (y=H-1)
+        y = H-1
+        if abs(a) > 1e-6:
+            x = -(c + b*y) / a
+            if 0 <= x < W: pts.append((int(x), H-1))
 
-    # Save and show
-    cv2.imshow("RANSAC Candidates", img)
+        if len(pts) == 2:
+            cv2.line(img_out, pts[0], pts[1], (0, 0, 255), 2)
+
+    cv2.imshow("Final Lines", img_out)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
