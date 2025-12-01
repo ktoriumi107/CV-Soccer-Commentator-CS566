@@ -2,6 +2,9 @@ import math
 import numpy as np
 import cv2
 
+avg_past_lines = None
+n = 0
+
 def mask_field_green(img):
     # convert to hsv
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -18,11 +21,14 @@ def mask_field_green(img):
     return mask
 
 def get_field_boundary_points(mask):
+    # get edges from mask
+    edges = cv2.Canny(mask, 70, 150)
+
     # get the external contours
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     
     # get the contour with the largest area (should be the exterior of the field)
-    contour = max(contours, key=cv2.contourArea)
+    contour = max(contours, key=lambda c: cv2.arcLength(c, False))
     
     # convert to points
     pts = contour.reshape(-1, 2)
@@ -62,7 +68,8 @@ def ransac_fit_line(points, threshold, iterations):
         # choose two random points
         i1, i2 = np.random.choice(n, 2, replace=False)
         p1 = points[i1]; p2 = points[i2]
-        x1,y1 = p1; x2,y2 = p2
+        x1,y1 = p1
+        x2,y2 = p2
 
         # compute line equation of form ax+by+c=0
         a = y1 - y2
@@ -90,113 +97,57 @@ def ransac_fit_line(points, threshold, iterations):
 
     return best_line, best_inliers
 
-def line_segment_endpoints_from_inliers(inlier_pts):
-    if inlier_pts is None or len(inlier_pts) < 2:
-        return None, None
+def filter_out_border(lines, size):
+    H, W, _ = size
+    threshold = 10
 
-    pts = inlier_pts.astype(float)
-    n = len(pts)
+    non_border = []
 
-    # find the pair of points with max distance
-    max_dist = -1
-    p1 = None
-    p2 = None
+    for (a,b,c) in lines:
+        pts = []
 
-    # compare every pair of points
-    for i in range(n):
-        for j in range(i + 1, n):
-            x1, y1 = pts[i]
-            x2, y2 = pts[j]
+        # left border when x = 0
+        if abs(b) > 1e-6:
+            y = -(c + a*0) / b
+            pts.append((0, y))
 
-            # euclidean distance
-            dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+        # right border when x = W
+        if abs(b) > 1e-6:
+            y = -(c + a*W) / b
+            pts.append((W, y))
 
-            # check if largest distance
-            if dist > max_dist:
-                max_dist = dist
-                p1 = (int(x1), int(y1))
-                p2 = (int(x2), int(y2))
+        # top border when y = 0
+        if abs(a) > 1e-6:
+            x = -(c + b*0) / a
+            pts.append((x, 0))
 
-    return p1, p2
+        # bottom border when y = H
+        if abs(a) > 1e-6:
+            x = -(c + b*H) / a
+            pts.append((x, H))
 
-def filter_out_border(segments, size):
-        filtered_segments = []
+        # find all intersections with the border
+        pts = [(x,y) for x,y in pts 
+               if -threshold <= x <= W+threshold and 
+                  -threshold <= y <= H+threshold]
 
-        # threshold for being near something
-        threshold = 10
-
-        # image size
-        H, W, _ = size
-
-        for (p1, p2) in segments:
-            x1, y1 = p1
-            x2, y2 = p2
-
-            # skip if line is near a border
-            if ((x1 < threshold and x2 < threshold) or
-                (x1 > (W-threshold) and x2 > (W-threshold)) or
-                (y1 < threshold and y2 < threshold) or
-                (y1 > (H-threshold) and y2 > (H-threshold))):
-                continue
-
-            filtered_segments.append((p1,p2))
-        
-        return filtered_segments
-
-def group_segments(segments):
-    threshold = np.deg2rad(10)
-
-    groups = []
-    sets = []
-
-    # for each potential line
-    for (p1, p2) in segments:
-        x1, y1 = p1
-        x2, y2 = p2
-
-        angle = np.arctan2((y2-y1),(x2-x1)) 
-
-        # add first element
-        if len(groups) == 0:
-            groups.append((angle-threshold), (angle+threshold))
-            sets.append([(p1,p2)])
+        # skip if not enough points
+        if len(pts) < 2:
             continue
 
-        # try to match it to a preset group
-        for i, (lower,upper) in groups:
-            # if it is within the groups range, add it
-            if lower<=angle and angle<=upper:
-                sets[i].append((p1,p2))
+        # compute midpoint of the segment inside frame
+        mx = (pts[0][0] + pts[1][0]) / 2
+        my = (pts[0][1] + pts[1][1]) / 2
 
-                # extend bounds in the appropriate direction
-                groups[i] =  (min(lower, angle - threshold),
-                              max(upper, angle + threshold))
-                break
+        # if midpoint near a border, then the entire segment is on the border
+        if (mx < threshold or mx > W-threshold or
+            my < threshold or my > H-threshold):
+            continue
 
-            if i == len(groups):
-                # no match, make a new group
-                groups.append((angle-threshold, angle+threshold))
-                sets.append([(p1, p2)])
+        # midpoint is not near a border, it is safe to append
+        non_border.append((a,b,c))
 
-    # get two most populated groups
-    # this should be the correct lines but could be unstable # TODO TODO
-    group_sizes = [(len(set), i) for i, set in enumerate(sets)]
-    group_sizes.sort(reverse=True)
-
-    # get two most populated groups
-    top_groups = group_sizes[:2]
-
-    final_lines = []
-
-    # get the average line equation per group
-    for group, i in top_groups:
-        lines = []
-
-        for (p1, p2) in group:
-            # realized how silly I am
-            print("No need for this, go back")
-
-    return final_lines
+    return non_border
 
 def average_line(lines):
     # get the average line for a group of lines
@@ -207,8 +158,8 @@ def average_line(lines):
 
     return (a/norm, b/norm, c/norm)
 
-def group_lines(lines):
-    angle_thresh = np.deg2rad(10)
+def group_lines(lines, size, angle_diff):
+    angle_thresh = np.deg2rad(5)
 
     # [(lower_angle, upper_angle),]
     groups = []
@@ -241,18 +192,37 @@ def group_lines(lines):
             groups.append((theta - angle_thresh, theta + angle_thresh))
             sets.append([(a, b, c)])
 
-    # get two most populated groups
-    # this should be the correct lines but could be unstable # TODO TODO
+    # sort groups by number of inliers
     group_sizes = [(len(set), i) for i, set in enumerate(sets)]
     group_sizes.sort(reverse=True)
 
-    # get two most populated groups
-    top_groups = group_sizes[:2]
+    # get the biggest group
+    _, group1 = group_sizes[0]
+    a1,b1,c1 = average_line(sets[group1])
 
-    _, group1 = top_groups[0]
-    _, group2 = top_groups[1]
+    # get the next biggest group that is close to perpendicular
+    i = 1 # index of group
+    
+    # go through all groups
+    while i < len(group_sizes):
+        _, curr_group = group_sizes[i]
+        a_curr, b_curr, c_curr = average_line(sets[curr_group])
 
-    return (average_line(sets[group1])), average_line(sets[group2])
+        # choose second group if the angle difference is big enough
+        difference = abs(math.atan2(b_curr, a_curr)-math.atan2(b1,a1))
+        if math.degrees(min(math.pi-difference, difference)) >= angle_diff:
+            return ((a1,b1,c1),(a_curr,b_curr,c_curr))
+        
+        i += 1
+            
+    # end of groups reached, return perpendicular line
+    # TODO come up with better value for c2
+    H, W = size
+
+    # have line 2 cross the center of the screen
+    c2 = -(-b1*W/2 + a1*H/2)
+
+    return ((a1,b1,c1),(-b1, a1, c2))
 
 def visualize(image, segments):
     out = image.copy()
@@ -268,16 +238,20 @@ def get_field_coordinate(line1, line2, camera_coordinate):
     a1,b1,c1 = line1
     a2,b2,c2 = line2
 
-    x_o,y_o = None
+    x_o = None
+    y_o = None
 
     # origin as intersection of two points
     # intersection of two lines, group as Ax=b: [a1 b1;a2 b2][x; y]=[-c1;-c2]
     # check A' is invertible
     if a1*b2 - a2*b1 < 1e-5:
+        print("First line", a1,b1,c1)
+        print("Second line", a2,b2,c2)
         print("Nearly parallel lines. Failed to get coordinates.")
         return None
     else:
         # x = A'b, A'=[b2 -b1; -a2 a1] / (a1*b2-a2*b1)
+        print("Got coordinates")
         x_o = (c1*b2-c2*b1)/(a1*b2-a2*b1)
         y_o = (-c1*a2+c2*a1)/(a1*b2-a2*b1)
 
@@ -294,11 +268,10 @@ def get_field_coordinate(line1, line2, camera_coordinate):
 
     return ((b1*x-a1*y)/norm1,(b2*x-a2*y)/norm2)
 
-
 ### FUNCTIONS TO BE USED EXTERNALLY ###
-def get_coordinates(img, objects):
+def get_coordinates(img, objects, show_lines):
     # tuning params
-    max_lines = 8
+    max_lines = 4
     ransac_thresh=2.0
     ransac_iter=2000
     min_inliers=30
@@ -310,14 +283,46 @@ def get_coordinates(img, objects):
     boundary_pts = get_field_boundary_points(green_mask)
 
     # get candidate lines using RANSAC (returned as (line, inlier_pts, len(inliers)))
-    candidate_lines = get_candidate_lines(boundary_pts, max_lines, ransac_thresh,
+    candidates = get_candidate_lines(boundary_pts, max_lines, ransac_thresh,
                                      ransac_iter,min_inliers)
     
-    # just keep lines from candidates for now # TODO subject to change
-    lines = [line for (line, inliers, coutn) in candidates]
+    # filter candidates
+    filtered_lines = []
+
+    for line, inliers, count in candidates:
+        # only counts lines with enough votes
+        if count > 10:
+            filtered_lines.append(line)
+
+    # filter out border
+    filtered_lines = filter_out_border(filtered_lines, size=img.shape)
 
     # get the two most voted for lines to keep as boundary lines 
-    final_line1, final_line2 = group_lines(lines)
+    final_line1, final_line2 = group_lines(filtered_lines, size=img.shape)        
+
+    # declare use of global vars
+    global avg_past_lines
+    global n
+
+    # update history of lines
+    if avg_past_lines is None:
+        avg_past_lines = final_line1
+        n = 1
+    else:
+        # refuse new values if they deviate too far from historyical average
+        # TODO makes field system fail entirely given a camera change
+        difference = 100
+
+        # compute differences for each line
+        diff1 = np.linalg.norm(np.array(avg_past_lines) - np.array(final_line1))
+
+        # update only if difference is below threshold
+        final_line1 = final_line1 if diff1 < difference else avg_past_lines
+
+        # update history
+        n += 1
+        avg1 = (np.array(avg_past_lines) * (n-1) + np.array(final_line1)) / n
+        avg_past_lines = avg1
 
     # return the passed objects' field coordinate
     field_coords = []
@@ -325,16 +330,83 @@ def get_coordinates(img, objects):
     for object in objects:
         field_coords.append(get_field_coordinate(final_line1, final_line2, object))
 
-    return field_coords
+    if show_lines:
+        return field_coords, (final_line1, final_line2)
+    else: 
+        return field_coords
 
+def visualize_points(points):
+    color=(0,0,255)
+    radius=10
+
+    W, H = (1000, 1000)
+    field = np.zeros((H, W, 3), dtype=np.uint8)
+
+    # remove Nones
+    points = [p for p in points if p is not None]
+    if not points:
+        return field
+
+    u_coords, v_coords = zip(*points)
+    u_min, u_max = min(u_coords), max(u_coords)
+    v_min, v_max = min(v_coords), max(v_coords)
+
+    u_span = max(u_max - u_min, 1e-6)
+    v_span = max(v_max - v_min, 1e-6)
+
+    for u, v in points:
+        # normalize to canvas coordinates
+        x = int((u - u_min) / u_span * (W - 1))
+        y = H - 1 - int((v - v_min) / v_span * (H - 1)) 
+        cv2.circle(field, (x, y), radius, color, -1)
+    return field
+
+def visualize_lines(frame, lines):
+    H, W = frame.shape[:2]
+    result = frame.copy()
+
+    color = (0, 0, 255)
+    
+    for (a,b,c) in lines:
+        pts = []
+
+        # left border (x=0)
+        if abs(b) > 1e-6:
+            y = int(-(c + a*0) / b)
+            if 0 <= y < H:
+                pts.append((0, y))
+
+        # right border (x=W-1)
+        if abs(b) > 1e-6:
+            y = int(-(c + a*(W-1)) / b)
+            if 0 <= y < H:
+                pts.append((W-1, y))
+
+        # top border (y=0)
+        if abs(a) > 1e-6:
+            x = int(-(c + b*0) / a)
+            if 0 <= x < W:
+                pts.append((x, 0))
+
+        # bottom border (y=H-1)
+        if abs(a) > 1e-6:
+            x = int(-(c + b*(H-1)) / a)
+            if 0 <= x < W:
+                pts.append((x, H-1))
+
+        # draw line if we got two points
+        if len(pts) >= 2:
+            cv2.line(result, pts[0], pts[1], color, 3)
+    return result
 #######################################
 
 if __name__ == "__main__":
     # tuning params
     max_lines = 8
-    ransac_thresh=2.0
-    ransac_iter=2000
-    min_inliers=30
+    ransac_thresh=20
+    ransac_iter=3000
+    min_inliers=10
+    angle_diff = 3 # degrees
 
     img = cv2.imread("test_images/oblique_field_view.png")
 
@@ -349,11 +421,11 @@ if __name__ == "__main__":
     # just keep lines for now # TODO subject to change
     lines = [line for (line, inliers, coutn) in candidates]
 
-    final_line1, final_line2 = group_lines(lines)
+    final_line1, final_line2 = group_lines(lines, img.shape[:2], angle_diff)
 
     H, W = img.shape[:2]
 
-    img_out = img.copy()
+    img_out = green_mask.copy()
     for (a, b, c) in [final_line1, final_line2]:
 
         # Compute intersection with image borders
