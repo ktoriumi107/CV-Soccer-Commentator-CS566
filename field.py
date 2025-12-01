@@ -16,7 +16,7 @@ def mask_field_green(img):
 
     # clean up mask 
     # https://docs.opencv.org/4.x/d9/d61/tutorial_py_morphological_ops.html
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((10,10), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((20,20), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((25,25), np.uint8))
 
     cv2.imshow("FUCKASS MASK", mask)
@@ -161,7 +161,7 @@ def average_line(lines):
     return (a/norm, b/norm, c/norm)
 
 def group_lines(lines, size, angle_diff):
-    angle_thresh = np.deg2rad(5)
+    angle_thresh = np.deg2rad(3)
 
     # [(lower_angle, upper_angle),]
     groups = []
@@ -198,9 +198,22 @@ def group_lines(lines, size, angle_diff):
     group_sizes = [(len(set), i) for i, set in enumerate(sets)]
     group_sizes.sort(reverse=True)
 
-    # get the biggest group
-    _, group1 = group_sizes[0]
-    a1,b1,c1 = average_line(sets[group1])
+    # get the biggest group that is nearly horizontal
+    i = 0
+    while i < len(group_sizes):
+        extra, group1 = group_sizes[i]
+        a1,b1,c1 = average_line(sets[group1])
+
+        # line angle must be from 0 to 30
+        angle = math.atan2(b1, a1)
+
+        if 0 <= angle <= np.deg2rad(30):
+            # group1 is within the correct angle range now
+            # remove it
+            group_sizes.pop(i)
+            break
+
+        i += 1
 
     # get the next biggest group that is close to perpendicular
     i = 1 # index of group
@@ -277,7 +290,7 @@ def get_field_coordinate(line1, line2, camera_coordinate):
 def get_coordinates(img, objects, show_lines):
     # tuning params
     max_lines = 8
-    ransac_thresh=5
+    ransac_thresh=3
     ransac_iter=3000
     min_inliers=10
     angle_diff = 15 # degrees
