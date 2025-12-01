@@ -16,8 +16,10 @@ def mask_field_green(img):
 
     # clean up mask 
     # https://docs.opencv.org/4.x/d9/d61/tutorial_py_morphological_ops.html
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((5,5), np.uint8))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((20,20), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((10,10), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((25,25), np.uint8))
+
+    cv2.imshow("FUCKASS MASK", mask)
     return mask
 
 def get_field_boundary_points(mask):
@@ -266,15 +268,20 @@ def get_field_coordinate(line1, line2, camera_coordinate):
     norm1 = math.sqrt(a1*a1 + b1*b1)
     norm2 = math.sqrt(a2*a2 + b2*b2)
 
+    if norm1 < 1e-5 or norm2 < 1e-5:
+        return None
+
     return ((b1*x-a1*y)/norm1,(b2*x-a2*y)/norm2)
 
 ### FUNCTIONS TO BE USED EXTERNALLY ###
 def get_coordinates(img, objects, show_lines):
     # tuning params
-    max_lines = 4
-    ransac_thresh=2.0
-    ransac_iter=2000
-    min_inliers=30
+    max_lines = 8
+    ransac_thresh=5
+    ransac_iter=3000
+    min_inliers=10
+    angle_diff = 15 # degrees
+
 
     # green to get the field only
     green_mask = mask_field_green(img)
@@ -298,7 +305,7 @@ def get_coordinates(img, objects, show_lines):
     filtered_lines = filter_out_border(filtered_lines, size=img.shape)
 
     # get the two most voted for lines to keep as boundary lines 
-    final_line1, final_line2 = group_lines(filtered_lines, size=img.shape)        
+    final_line1, final_line2 = group_lines(filtered_lines, size=img.shape[:2], angle_diff=angle_diff)        
 
     # declare use of global vars
     global avg_past_lines
@@ -311,7 +318,7 @@ def get_coordinates(img, objects, show_lines):
     else:
         # refuse new values if they deviate too far from historyical average
         # TODO makes field system fail entirely given a camera change
-        difference = 100
+        difference = 50
 
         # compute differences for each line
         diff1 = np.linalg.norm(np.array(avg_past_lines) - np.array(final_line1))
@@ -330,6 +337,9 @@ def get_coordinates(img, objects, show_lines):
     for object in objects:
         field_coords.append(get_field_coordinate(final_line1, final_line2, object))
 
+    # filter coordinates that were marked as invalid
+    field_coords = [coord for coord in field_coords if coord is not None]
+
     if show_lines:
         return field_coords, (final_line1, final_line2)
     else: 
@@ -344,7 +354,8 @@ def visualize_points(points):
 
     # remove Nones
     points = [p for p in points if p is not None]
-    if not points:
+
+    if len(points) == 0 or points is None:
         return field
 
     u_coords, v_coords = zip(*points)

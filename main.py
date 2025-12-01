@@ -1,10 +1,17 @@
+from collections import defaultdict, deque
+import math
+import os
+import cv2
 import easyocr
 import time
+import numpy as np
+from ultralytics import YOLO
+import field
 
 # =======================
 # Config
 # =======================
-VIDEO_PATH = "test_video_cropped.mp4"     # or "webcam" / 0
+VIDEO_PATH = "soccer_vid_flipped.mp4"     # or "webcam" / 0
 USE_GPU    = False                        # True if you installed CUDA torch & want GPU OCR
 
 # Player detection & size thresholds
@@ -725,6 +732,23 @@ def main():
                     tid = int(b.id[0].item()) if b.id is not None else -1
                     if tid >= 0:
                         players.append((tid, (int(x1),int(y1),int(w),int(h)), conf))
+
+        box_points = []
+        for tid, (x1, y1, w, h), conf in players:
+            bx = x1 + w / 2   # horizontal center
+            by = y1 + h       # bottom edge
+            box_points.append((bx, by))
+
+        show_lines = True
+
+        if show_lines:
+            field_coords, lines = field.get_coordinates(frame, box_points, frame.size)
+            with_lines = field.visualize_lines(frame, lines)
+            cv2.imshow("Field with lines", with_lines)
+        else:
+            field_coords = field.get_coordinates(frame, box_points, frame.size)
+            field.visualize_points(field_coords)
+         
 
         # ---------- IMM hybrid ball update ----------
         if ball_cands:
