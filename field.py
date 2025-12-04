@@ -5,6 +5,8 @@ import cv2
 avg_past_lines = None
 n = 0
 
+last_frame_points = []
+
 def mask_field_green(img):
     # convert to hsv
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -19,7 +21,6 @@ def mask_field_green(img):
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((20,20), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((25,25), np.uint8))
 
-    cv2.imshow("FUCKASS MASK", mask)
     return mask
 
 def get_field_boundary_points(mask):
@@ -161,7 +162,7 @@ def average_line(lines):
     return (a/norm, b/norm, c/norm)
 
 def group_lines(lines, size, angle_diff):
-    angle_thresh = np.deg2rad(3)
+    angle_thresh = np.deg2rad(5)
 
     # [(lower_angle, upper_angle),]
     groups = []
@@ -170,7 +171,7 @@ def group_lines(lines, size, angle_diff):
     sets = []
 
     for (a, b, c) in lines:
-        theta = np.arctan2(b, a)
+        theta = np.arctan2(-a, b)
 
         # add first line
         if len(groups) == 0:
@@ -205,7 +206,7 @@ def group_lines(lines, size, angle_diff):
         a1,b1,c1 = average_line(sets[group1])
 
         # line angle must be from 0 to 30
-        angle = math.atan2(b1, a1)
+        angle = math.atan2(-b1, a1)
 
         if 0 <= angle <= np.deg2rad(30):
             # group1 is within the correct angle range now
@@ -216,7 +217,7 @@ def group_lines(lines, size, angle_diff):
         i += 1
 
     # get the next biggest group that is close to perpendicular
-    i = 1 # index of group
+    i = 0 # index of group
     
     # go through all groups
     while i < len(group_sizes):
@@ -224,8 +225,9 @@ def group_lines(lines, size, angle_diff):
         a_curr, b_curr, c_curr = average_line(sets[curr_group])
 
         # choose second group if the angle difference is big enough
-        difference = abs(math.atan2(b_curr, a_curr)-math.atan2(b1,a1))
-        if math.degrees(min(math.pi-difference, difference)) >= angle_diff:
+        difference = abs(math.atan2(-b_curr, a_curr)-math.atan2(-b1,a1))
+
+        if math.degrees(min(math.pi-difference, difference)) > angle_diff:
             return ((a1,b1,c1),(a_curr,b_curr,c_curr))
         
         i += 1
@@ -290,9 +292,9 @@ def get_field_coordinate(line1, line2, camera_coordinate):
 def get_coordinates(img, objects, show_lines):
     # tuning params
     max_lines = 8
-    ransac_thresh=3
+    ransac_thresh=10
     ransac_iter=3000
-    min_inliers=10
+    min_inliers=5
     angle_diff = 15 # degrees
 
 
@@ -311,7 +313,7 @@ def get_coordinates(img, objects, show_lines):
 
     for line, inliers, count in candidates:
         # only counts lines with enough votes
-        if count > 10:
+        if count > min_inliers:
             filtered_lines.append(line)
 
     # filter out border
@@ -331,7 +333,7 @@ def get_coordinates(img, objects, show_lines):
     else:
         # refuse new values if they deviate too far from historyical average
         # TODO makes field system fail entirely given a camera change
-        difference = 50
+        difference = 100
 
         # compute differences for each line
         diff1 = np.linalg.norm(np.array(avg_past_lines) - np.array(final_line1))
@@ -353,6 +355,14 @@ def get_coordinates(img, objects, show_lines):
     # filter coordinates that were marked as invalid
     field_coords = [coord for coord in field_coords if coord is not None]
 
+    # update past points or return past points if no new coordinates
+    global last_frame_points
+
+    if len(field_coords) != 0:
+        last_frame_points = field_coords
+    else:
+        field_coords = last_frame_points
+
     if show_lines:
         return field_coords, (final_line1, final_line2)
     else: 
@@ -364,6 +374,7 @@ def visualize_points(points):
 
     W, H = (1000, 1000)
     field = np.zeros((H, W, 3), dtype=np.uint8)
+    #field = cv2.imread("data/field.png")
 
     # remove Nones
     points = [p for p in points if p is not None]
