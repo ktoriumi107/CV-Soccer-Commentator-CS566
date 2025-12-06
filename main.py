@@ -739,17 +739,17 @@ def main():
             by = y1 + h       # bottom edge
             box_points.append((bx, by))
 
-        show_lines = True
+        show_lines = False
 
         if show_lines:
-            field_coords, lines = field.get_coordinates(frame, box_points, frame.size)
-            with_lines = field.visualize_lines(frame, lines)
-            cv2.imshow("Field with lines", with_lines)
+            field_coords, lines = field.get_coordinates(frame, box_points, show_lines)
+            if lines is not None: 
+                with_lines = field.visualize_lines(frame, lines)
+                cv2.imshow("Field with lines", with_lines)
         else:
-            field_coords = field.get_coordinates(frame, box_points, frame.size)
+            field_coords, _ = field.get_coordinates(frame, box_points, frame.size)
             field.visualize_points(field_coords)
          
-
         # ---------- IMM hybrid ball update ----------
         if ball_cands:
             ball_cands.sort(reverse=True)

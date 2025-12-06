@@ -241,6 +241,32 @@ def group_lines(lines, size, angle_diff):
 
     return ((a1,b1,c1),(-b1, a1, c2))
 
+def cluster_by_orientation(candidates, angle_thresh):
+    clusters = []
+
+    # go through each line
+    for (line, pts, _) in candidates:
+        a,b,c = line
+        theta = np.arctan2(-a, b)
+
+        matched = False
+
+        # match it to a cluster
+        for cluster in clusters:
+            if abs(theta-cluster["angle"]) < angle_thresh:
+                # close enough to the cluster to group them
+                cluster["lines"].append((line,pts))
+                cluster["pts"].append(pts)
+                matched = True
+                break
+        # make a new cluster if no  match
+        if not matched:
+            clusters.append({"angle":theta,
+                             "lines":[(line,pts)],
+                             "pts":[pts]})
+            
+    return clusters
+
 def visualize(image, segments):
     out = image.copy()
 
@@ -296,6 +322,7 @@ def get_coordinates(img, objects, show_lines):
     ransac_iter=3000
     min_inliers=5
     angle_diff = 15 # degrees
+    line_diff = 20
 
 
     # green to get the field only
@@ -320,53 +347,111 @@ def get_coordinates(img, objects, show_lines):
     filtered_lines = filter_out_border(filtered_lines, size=img.shape)
 
     # get the two most voted for lines to keep as boundary lines 
-    final_line1, final_line2 = group_lines(filtered_lines, size=img.shape[:2], angle_diff=angle_diff)        
+    #final_line1, final_line2 = group_lines(filtered_lines, size=img.shape[:2], angle_diff=angle_diff)        
 
-    # declare use of global vars
+    # cluster by orientation
+    clusters = cluster_by_orientation(candidates, np.deg2rad(angle_diff))
+    best_cluster = max(clusters, key=lambda c: sum(len(p) for p in c["pts"]))
+    best_pts = np.vstack(best_cluster["pts"])
+    best_line, inliers = ransac_fit_line(best_pts, ransac_thresh, ransac_iter)
+    
+    if best_line is None:
+        # no good line found
+        print("No lines found")
+        return [], None
+
+    # normalize first line
+    a1, b1, c1 = best_line
+    n1 = math.hypot(a1, b1)
+    a1, b1, c1 = a1 / n1, b1 / n1, c1 / n1
+    final_line1 = (a1, b1, c1)
+
+    # try to determine second line
+    final_line2 = None
+
+    # start with second largest cluster
+    clusters_sorted = sorted(clusters, key=lambda c: sum(len(p) for p in c["pts"]), reverse=True
+    )
+
+    # try second greatest cluster
+    if len(clusters_sorted) >= 2:
+        second_cluster = clusters_sorted[1]
+
+        # check if enough points
+        if sum(len(p) for p in second_cluster["pts"]) >= min_inliers:
+            pts = np.vstack(second_cluster["pts"])
+            line2, inliers2 = ransac_fit_line(pts, ransac_thresh, ransac_iter)
+
+            if line2 is not None:
+                a2, b2, c2 = line2
+                n2 = math.hypot(a2, b2)
+                a2, b2, c2 = a2/n2, b2/n2, c2/n2
+                final_line2 = (a2, b2, c2)
+
     global avg_past_lines
     global n
 
-    # update history of lines
+    # if a second line wasn't found, try perpendicular
+    if final_line2 is None and avg_past_lines is None:
+        # go through center of screen (try other later)
+        H, W = img.shape[:2]
+        x_c = W / 2
+        y_c = H / 2
+
+        c2 = -(b1*x_c + a1*y_c)
+
+        a2, b2, c2 = -b1/n1, a1/n1, c2/n1
+
+        final_line2 = (a2, b2, c2)
+
+    # update history
     if avg_past_lines is None:
-        avg_past_lines = final_line1
+        avg_past_lines = (np.array(final_line1), np.array(final_line2))
         n = 1
     else:
-        # refuse new values if they deviate too far from historyical average
-        # TODO makes field system fail entirely given a camera change
-        difference = 100
+        prev1, prev2 = avg_past_lines
+        diff1 = np.linalg.norm(prev1 - np.array(final_line1))
 
-        # compute differences for each line
-        diff1 = np.linalg.norm(np.array(avg_past_lines) - np.array(final_line1))
-
-        # update only if difference is below threshold
-        final_line1 = final_line1 if diff1 < difference else avg_past_lines
-
-        # update history
+        # use previous line if difference is too big
+        if diff1 < line_diff:
+            avg_past_lines = (np.array(final_line1), np.array(final_line2))            
+        else:
+            avg_past_lines = (prev1, prev2)    
+        
         n += 1
-        avg1 = (np.array(avg_past_lines) * (n-1) + np.array(final_line1)) / n
-        avg_past_lines = avg1
 
-    # return the passed objects' field coordinate
+    # compute field coordinates for provided objects
     field_coords = []
-
-    for object in objects:
-        field_coords.append(get_field_coordinate(final_line1, final_line2, object))
+    for obj in objects:
+        if final_line1 is not None and final_line2 is not None:
+            coord = get_field_coordinate(final_line1, final_line2, obj)
+            field_coords.append(coord)
 
     # filter coordinates that were marked as invalid
     field_coords = [coord for coord in field_coords if coord is not None]
 
     # update past points or return past points if no new coordinates
     global last_frame_points
-
     if len(field_coords) != 0:
         last_frame_points = field_coords
     else:
         field_coords = last_frame_points
 
+    # debug: print a few mapped coords so we can confirm movement across frames
+    if len(field_coords) > 0:
+        print("[field] sample mapped coords:", field_coords[: min(5, len(field_coords))])
+
+    # ensure both lines exist
+    if final_line1 is None or final_line2 is None:
+        if show_lines:
+            return field_coords, None
+        else:
+            return field_coords, None
+
     if show_lines:
         return field_coords, (final_line1, final_line2)
-    else: 
-        return field_coords
+    else:
+        return field_coords, None
 
 def visualize_points(points):
     color=(0,0,255)
