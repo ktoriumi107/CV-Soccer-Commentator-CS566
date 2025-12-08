@@ -7,6 +7,7 @@ import time
 import numpy as np
 from ultralytics import YOLO
 import field
+from motion_interpreter import MotionInterpreter
 
 # =======================
 # Config
@@ -25,15 +26,15 @@ LEGIBILITY_MIN      = 0.60                # minimum legibility score for trying 
 LEGIBILITY_WEIGHTS  = "models/legibility.pth"  # optional legibility model; proxy used if missing
 
 # Label smoothing / switching
-LABEL_WINDOW_SIZE   = 5
-LABEL_MIN_CONSENSUS = 2
+LABEL_WINDOW_SIZE   = 20
+LABEL_MIN_CONSENSUS = 4
 LABEL_TTL_FRAMES    = 50                  # used if sticky lock is disabled
 LABEL_SHOW_CONF_MIN = 0.55
 DISPLAY_SWITCH_CONF_MIN = 0.65            # show jersey if (stable and conf >= this)
 
 # Sticky jersey behavior (no revert to ID after lock)
 STICKY_JERSEY_AFTER_LOCK = True           # once we lock a number, keep showing it
-CHANGE_GUARD_VOTES       = 4              # require this many strong votes for a *different* number to switch
+CHANGE_GUARD_VOTES       = 6              # require this many strong votes for a *different* number to switch
 
 # Ball proximity gating (to prioritize OCR for likely-possessing players)
 NEAR_BALL_RADIUS_PX = 180
@@ -245,22 +246,21 @@ class NumberCache:
             return
 
         self.votes[tid].append((num, conf))
+
+        # prune counts to only include what is still in the votes window
+        current_nums = [n for (n, _) in self.votes[tid]]
+        self.counts[tid] = {n: current_nums.count(n) for n in set(current_nums)}
+
         self.counts[tid][num] += 1
         self.last_seen[tid] = fidx
 
-        # If already locked to another number, require guard votes to switch.
-        if tid in self.locked and tid in self.stable:
+        # If sticky mode is enabled and we are already locked, DO NOT allow switching.
+        if STICKY_JERSEY_AFTER_LOCK and tid in self.locked and tid in self.stable:
             locked_num, locked_conf, _ = self.stable[tid]
-            if num != locked_num:
-                comp_votes = sum(1 for (n, c) in self.votes[tid] if n == num and c >= OCR_CONF_MIN)
-                if comp_votes >= CHANGE_GUARD_VOTES:
-                    # switch lock
-                    new_conf = np.mean([c for (n,c) in self.votes[tid] if n==num]) if any(n==num for (n,_) in self.votes[tid]) else conf
-                    self.stable[tid] = (num, float(min(0.99, max(0.45, new_conf))), fidx)
-            else:
-                # reinforce locked label confidence
-                self.stable[tid] = (locked_num, float(min(0.99, max(locked_conf, conf))), fidx)
+            # reinforce confidence only
+            self.stable[tid] = (locked_num, float(min(0.99, max(locked_conf, conf))),fidx)
             return
+
 
         # Not locked yet → look for initial consensus to lock
         best_num = None
@@ -275,9 +275,11 @@ class NumberCache:
 
         if best_num is not None and best_pair[0] >= self.min_consensus:
             locked_conf = float(min(0.99, max(0.45, best_pair[1])))
-            self.stable[tid] = (best_num, locked_conf, fidx)
-            if STICKY_JERSEY_AFTER_LOCK:
-                self.locked.add(tid)  # become sticky
+            
+            if tid not in self.stable:
+                self.stable[tid] = (best_num, locked_conf, fidx)
+                self.locked.add(tid)
+
 
     def lookup(self, tid, fidx):
         """
@@ -695,6 +697,11 @@ team_model = TeamColorModel()  # team color model
 # Main
 # =======================
 def main():
+    show_lines = False
+    show_movement = True
+
+    motion = MotionInterpreter()
+
     cap = cv2.VideoCapture(0 if str(VIDEO_PATH).lower() in ("webcam","0") else VIDEO_PATH)
     assert cap.isOpened(), f"Cannot open {VIDEO_PATH}"
     frame_idx = 0
@@ -739,8 +746,7 @@ def main():
             by = y1 + h       # bottom edge
             box_points.append((bx, by))
 
-        show_lines = False
-
+        # ---------- Field lines ----------
         if show_lines:
             field_coords, lines = field.get_coordinates(frame, box_points, show_lines)
             if lines is not None: 
@@ -750,7 +756,7 @@ def main():
             field_coords, _ = field.get_coordinates(frame, box_points, frame.size)
             field.visualize_points(field_coords)
          
-        # ---------- IMM hybrid ball update ----------
+        # ---------- IMM ball update ----------
         if ball_cands:
             ball_cands.sort(reverse=True)
             conf, _, cx, cy = ball_cands[0]
@@ -782,7 +788,7 @@ def main():
 
         ball_center = ball.center
 
-        # Snap near foot for possession
+        # Snap to foot for possession
         if ball_center is not None and players:
             bx, by = ball_center
             best = None
@@ -806,28 +812,37 @@ def main():
                 p2 = (int(ball.hist[i][0]),   int(ball.hist[i][1]))
                 cv2.line(frame, p1, p2, color, 2)
 
-        # ---------- Players: OCR & labels (ID by default → switch to jersey when stable) ----------
+        # ---------- Players ----------
         font = cv2.FONT_HERSHEY_SIMPLEX
         active_tids = []
+
         for tid, bbox, pconf in players:
             active_tids.append(tid)
             x,y,w,h = bbox
 
-            # Torso crop used for team-color estimation + ROI debug box
+            # ------------------- MOTION INTERPRETER UPDATE -------------------
+            if ball_center is not None:
+                px = x + w/2          # player bottom center X
+                py = y + h            # player bottom center Y
+                motion.update(
+                    tid,
+                    player_pos=(px, py),
+                    ball_pos=ball_center,
+                    frame_idx=frame_idx
+                )
+            # -----------------------------------------------------------------
+
+            # torso crop
             crop, roi = torso_crop(frame, (x, y, w, h), return_box=True)
             rx1, ry1, rx2, ry2 = roi
             cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (255, 0, 255), 2)
 
-            # Update team color model from this torso crop
             team_model.update(tid, crop)
             team_id = team_model.get_team(tid)
 
             jersey, jconf, stable = cache.lookup(tid, frame_idx)
-
-            # Show ID by default; switch to jersey when stable enough
             show_jersey = bool(jersey) and stable and (jconf >= DISPLAY_SWITCH_CONF_MIN)
 
-            # Include team label if known
             if team_id is not None:
                 if show_jersey:
                     label_text = f"Team {team_id} #{jersey}"
@@ -840,11 +855,19 @@ def main():
             cv2.putText(frame, label_text, (x, y-8), font, 0.8, (0,0,0), 3, cv2.LINE_AA)
             cv2.putText(frame, label_text, (x, y-8), font, 0.8, color, 2, cv2.LINE_AA)
 
-            # Skip OCR for tiny boxes
+            # ------------------- DRAW MOTION STATE -------------------
+            state_info = motion.get_state(tid)
+            motion_label = state_info["state"]
+            print(f"Player ID {tid} {motion_label}")
+
+            if show_movement:
+                cv2.putText(frame, motion_label, (x, y+h+20), font, 0.6, (0,255,255), 2, cv2.LINE_AA)
+            # ----------------------------------------------------------
+
+            # ----- OCR scheduling -----
             if bbox_area(bbox) < MIN_BBOX_AREA_FRAC * (frame.shape[0]*frame.shape[1]):
                 continue
 
-            # OCR scheduling: unlabeled tracks aggressively; also near-ball; plus a staggered periodic try.
             has_stable   = cache.is_stable(tid, frame_idx)
             no_label_yet = (jersey == "") and (not has_stable)
             near = (ball_center is not None and dist(bbox_center(bbox), ball_center) <= NEAR_BALL_RADIUS_PX)
@@ -856,9 +879,7 @@ def main():
             if not should_ocr:
                 continue
 
-            # FULL BODY CROP (matches your image success)
             crop_full = frame[y:y+h, x:x+w]
-
             leg = legibility_score(crop_full) if crop_full is not None else 0.0
             if leg < (LEGIBILITY_MIN * 0.85) and not no_label_yet:
                 continue
@@ -867,8 +888,6 @@ def main():
             digits, pred_conf, tag = read_jersey_any(crop_full, reader, prefer="easyocr", verbose=False)
             if digits:
                 cache.update(tid, digits, pred_conf, frame_idx)
-                # Uncomment for debug:
-                # print(f"[UPDATE] f={frame_idx} tid={tid} => #{digits} (conf={pred_conf:.2f}) via {tag}")
 
         # ---------- UI ----------
         cv2.imshow("SoccerRT", frame)
