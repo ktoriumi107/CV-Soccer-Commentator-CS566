@@ -858,7 +858,11 @@ def main():
             # ------------------- DRAW MOTION STATE -------------------
             state_info = motion.get_state(tid)
             motion_label = state_info["state"]
-            print(f"Player ID {tid} {motion_label}")
+            #print(f"Player ID {tid} {motion_label}")
+
+            # test case for Alejandro Garnacho, number 49 on Chelsea
+            if tid == 2:
+                print(f"Garnacho {motion_label}")
 
             if show_movement:
                 cv2.putText(frame, motion_label, (x, y+h+20), font, 0.6, (0,255,255), 2, cv2.LINE_AA)

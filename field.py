@@ -288,13 +288,13 @@ def get_field_coordinate(line1, line2, camera_coordinate):
     # intersection of two lines, group as Ax=b: [a1 b1;a2 b2][x; y]=[-c1;-c2]
     # check A' is invertible
     if a1*b2 - a2*b1 < 1e-5:
-        print("First line", a1,b1,c1)
-        print("Second line", a2,b2,c2)
-        print("Nearly parallel lines. Failed to get coordinates.")
+        #print("First line", a1,b1,c1)
+        #print("Second line", a2,b2,c2)
+        #print("Nearly parallel lines. Failed to get coordinates.")
         return None
     else:
         # x = A'b, A'=[b2 -b1; -a2 a1] / (a1*b2-a2*b1)
-        print("Got coordinates")
+        #print("Got coordinates")
         x_o = (c1*b2-c2*b1)/(a1*b2-a2*b1)
         y_o = (-c1*a2+c2*a1)/(a1*b2-a2*b1)
 
@@ -357,7 +357,7 @@ def get_coordinates(img, objects, show_lines):
     
     if best_line is None:
         # no good line found
-        print("No lines found")
+        #print("No lines found")
         return [], None
 
     # normalize first line
@@ -438,8 +438,8 @@ def get_coordinates(img, objects, show_lines):
         field_coords = last_frame_points
 
     # debug: print a few mapped coords so we can confirm movement across frames
-    if len(field_coords) > 0:
-        print("[field] sample mapped coords:", field_coords[: min(5, len(field_coords))])
+    #if len(field_coords) > 0:
+        #print("[field] sample mapped coords:", field_coords[: min(5, len(field_coords))])
 
     # ensure both lines exist
     if final_line1 is None or final_line2 is None:
